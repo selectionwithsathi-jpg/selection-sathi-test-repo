@@ -4,6 +4,7 @@ import pytest
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import StaleElementReferenceException, NoSuchElementException
 
 KNOWN_TEST_OTP = os.environ.get('KNOWN_TEST_OTP', '123456')
 WRONG_TEST_OTP = '000111' if KNOWN_TEST_OTP != '000111' else '111000'
@@ -64,6 +65,45 @@ def _find_scoped_submit(driver, field):
         b for b in driver.find_elements(By.CSS_SELECTOR, 'button[type="submit"], input[type="submit"]')
         if b.is_displayed() and b.is_enabled()
     ]
+
+
+def _get_token(driver):
+    try:
+        return driver.execute_script(
+            "return window.localStorage.getItem('token') || window.localStorage.getItem('access_token') "
+            "|| window.sessionStorage.getItem('token') || window.sessionStorage.getItem('access_token');"
+        )
+    except Exception:
+        return None
+
+
+def _send_otp(driver, helpers):
+    """Load /login fresh, clear storage, and submit the phone number once.
+    Returns the list of visible OTP input fields (empty if the OTP screen never appeared)."""
+    tel_field = WebDriverWait(driver, 10).until(lambda d: _find_phone_login_field(d))
+    tel_field.clear()
+    tel_field.send_keys(PHONE_NUMBER)
+    submit_candidates = _find_scoped_submit(driver, tel_field)
+    if not submit_candidates:
+        submit_candidates = [
+            b for b in driver.find_elements(By.XPATH, OTP_SEND_BUTTON_XPATH)
+            if b.is_displayed() and b.is_enabled()
+        ]
+    assert submit_candidates, 'Could not find any submit/send-OTP button scoped to the phone login form'
+    submit_candidates[0].click()
+    helpers['wait_ready'](driver)
+    time.sleep(1)
+    return [f for f in driver.find_elements(By.CSS_SELECTOR, OTP_INPUT_SELECTOR) if f.is_displayed()]
+
+
+def _fill_otp(otp_fields, code):
+    if len(otp_fields) == 1:
+        otp_fields[0].clear()
+        otp_fields[0].send_keys(code)
+    else:
+        for field, digit in zip(otp_fields, code):
+            field.clear()
+            field.send_keys(digit)
 
 
 def test_public_login_page_renders(driver, base_url, helpers):
