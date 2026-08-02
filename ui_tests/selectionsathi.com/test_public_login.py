@@ -6,6 +6,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 KNOWN_TEST_OTP = os.environ.get('KNOWN_TEST_OTP', '123456')
+WRONG_TEST_OTP = '000111' if KNOWN_TEST_OTP != '000111' else '111000'
 OTP_INPUT_SELECTOR = (
     'input[type="number"], input[maxlength="6"], input[maxlength="4"], input[maxlength="1"], '
     'input[inputmode="numeric"], input[autocomplete="one-time-code"]'
@@ -119,6 +120,67 @@ def test_otp_login_phone_field_renders_and_validates(driver, base_url, helpers):
     )
 
 
+def test_otp_login_incorrect_otp_rejected(driver, base_url, helpers):
+    """Closes a previously-unverified security gap: does the server actually
+    reject a wrong OTP, or does the UI accept anything client-side?"""
+    driver.get(f'{base_url}{PUBLIC_LOGIN_PATH}')
+    helpers['wait_ready'](driver)
+    helpers['clear_storage'](driver)
+    tel_field = WebDriverWait(driver, 10).until(lambda d: _find_phone_login_field(d))
+    tel_field.clear()
+    tel_field.send_keys(PHONE_NUMBER)
+
+    submit_candidates = _find_scoped_submit(driver, tel_field)
+    if not submit_candidates:
+        submit_candidates = [
+            b for b in driver.find_elements(By.XPATH, OTP_SEND_BUTTON_XPATH)
+            if b.is_displayed() and b.is_enabled()
+        ]
+    assert submit_candidates, 'Could not find any submit/send-OTP button scoped to the phone login form'
+    submit_candidates[0].click()
+    helpers['wait_ready'](driver)
+    time.sleep(1)
+
+    otp_fields = [
+        f for f in driver.find_elements(By.CSS_SELECTOR, OTP_INPUT_SELECTOR) if f.is_displayed()
+    ]
+    if not otp_fields:
+        pytest.skip(
+            f'No OTP entry field appeared after sending OTP (current_url={driver.current_url!r}) -- '
+            "likely blocked by the known OTP resend/rate-limit issue rather than this test's target behavior"
+        )
+
+    if len(otp_fields) == 1:
+        otp_fields[0].send_keys(WRONG_TEST_OTP)
+    else:
+        for field, digit in zip(otp_fields, WRONG_TEST_OTP):
+            field.send_keys(digit)
+
+    verify_candidates = _find_scoped_submit(driver, otp_fields[0])
+    if not verify_candidates:
+        verify_candidates = [
+            b for b in driver.find_elements(By.XPATH, OTP_SEND_BUTTON_XPATH)
+            if b.is_displayed() and b.is_enabled()
+        ]
+    if verify_candidates:
+        verify_candidates[0].click()
+    helpers['wait_ready'](driver)
+    time.sleep(1)
+
+    token = helpers['has_token'](driver)
+    body = helpers['body_text'](driver)
+    assert not token, (
+        f'A deliberately WRONG OTP ({WRONG_TEST_OTP}) still established a session -- '
+        'OTP verification is not being enforced server-side (auth bypass)'
+    )
+    feedback_shown = any(kw in body.lower() for kw in ['invalid', 'incorrect', 'wrong', 'error'])
+    stayed_on_login = PUBLIC_LOGIN_PATH in driver.current_url
+    assert feedback_shown or stayed_on_login, (
+        f'Wrong OTP correctly did not grant a session, but the app gave no error messaging and '
+        f'navigated away from /login. current_url={driver.current_url!r} body_snippet={body[:300]!r}'
+    )
+
+
 def test_otp_login_sends_otp_for_valid_number(driver, base_url, helpers):
     driver.get(f'{base_url}{PUBLIC_LOGIN_PATH}')
     helpers['wait_ready'](driver)
@@ -198,4 +260,55 @@ def test_otp_login_end_to_end_valid_number(driver, base_url, helpers):
     assert token or '/login' not in current_url, (
         f'OTP submission with {KNOWN_TEST_OTP!r} did not establish a session: '
         f'no token in storage and still on {current_url}'
+    )
+
+
+def test_otp_resend_within_window_handled_safely(driver, base_url, helpers):
+    """Regression test for a bug found earlier today (TMS run 2148): sending a
+    second OTP shortly after the first silently returned homepage content with
+    no OTP screen and no error message. This formalizes that observation as a
+    repeatable check instead of a one-off model assertion."""
+    driver.get(f'{base_url}{PUBLIC_LOGIN_PATH}')
+    helpers['wait_ready'](driver)
+    helpers['clear_storage'](driver)
+    tel_field = WebDriverWait(driver, 10).until(lambda d: _find_phone_login_field(d))
+    tel_field.clear()
+    tel_field.send_keys(PHONE_NUMBER)
+    first_submit = _find_scoped_submit(driver, tel_field)
+    assert first_submit, 'Could not find submit button for first OTP send'
+    first_submit[0].click()
+    helpers['wait_ready'](driver)
+    time.sleep(1)
+
+    first_otp_fields = [f for f in driver.find_elements(By.CSS_SELECTOR, OTP_INPUT_SELECTOR) if f.is_displayed()]
+    if not first_otp_fields:
+        pytest.skip(
+            f'First OTP send did not reach the OTP screen (current_url={driver.current_url!r}) -- '
+            'cannot exercise resend behavior this run'
+        )
+
+    driver.get(f'{base_url}{PUBLIC_LOGIN_PATH}')
+    helpers['wait_ready'](driver)
+    tel_field2 = WebDriverWait(driver, 10).until(lambda d: _find_phone_login_field(d))
+    tel_field2.clear()
+    tel_field2.send_keys(PHONE_NUMBER)
+    second_submit = _find_scoped_submit(driver, tel_field2)
+    assert second_submit, 'Could not find submit button for second (resend) OTP send'
+    second_submit[0].click()
+    helpers['wait_ready'](driver)
+    time.sleep(1)
+
+    second_otp_fields = [f for f in driver.find_elements(By.CSS_SELECTOR, OTP_INPUT_SELECTOR) if f.is_displayed()]
+    body = helpers['body_text'](driver)
+    current_url = driver.current_url
+
+    got_otp_screen = bool(second_otp_fields)
+    got_feedback = any(kw in body.lower() for kw in ['try again', 'wait', 'too many', 'rate limit', 'otp', 'code', 'error'])
+    stayed_on_login = PUBLIC_LOGIN_PATH in current_url
+
+    bug_reproduced = not (got_otp_screen or got_feedback or stayed_on_login)
+    assert not bug_reproduced, (
+        'Resending OTP shortly after the first send silently navigated away with no OTP screen and '
+        f'no error feedback -- current_url={current_url!r} body_snippet={body[:300]!r} '
+        '(matches known bug from an earlier session today, TMS run 2148)'
     )
