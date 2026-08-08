@@ -1,5 +1,6 @@
 import os
 import time
+from urllib.parse import urlparse
 import pytest
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -531,4 +532,32 @@ def test_otp_session_token_unique_per_login(driver, base_url, helpers):
     assert token_1 != token_2, (
         'Two separate valid OTP logins produced the IDENTICAL session token -- '
         'possible session fixation (a fresh token should be minted per login)'
+    )
+
+
+def test_login_open_redirect_external_domain_not_honored(driver, base_url, helpers):
+    """New this session, closes a gap the VLM flagged on the redirect-param
+    login variant: an attacker-controlled redirect target must not cause the
+    app to actually NAVIGATE off-domain, and must not be reflected unescaped
+    into a clickable/auto-following link. Checks the real navigated hostname
+    (not a raw substring match against the URL, which trivially contains the
+    injected value as long as it sits unexploited in the query string -- that
+    is the safe, expected state, not a failure)."""
+    evil_url = 'https://evil.example.com'
+    driver.get(f'{base_url}{PUBLIC_LOGIN_PATH}?redirect=' + evil_url.replace(':', '%3A').replace('/', '%2F'))
+    helpers['wait_ready'](driver)
+
+    current = driver.current_url
+    navigated_host = urlparse(current).netloc
+    assert navigated_host.endswith('selectionsathi.com'), (
+        f'Page actually navigated to a different host than selectionsathi.com after loading a login URL '
+        f'with a malicious redirect param -- navigated_host={navigated_host!r} current_url={current!r}'
+    )
+
+    hrefs = [
+        (a.get_attribute('href') or '') for a in driver.find_elements(By.TAG_NAME, 'a')
+    ]
+    leaking_links = [h for h in hrefs if urlparse(h).netloc == 'evil.example.com']
+    assert not leaking_links, (
+        f'The malicious redirect param was reflected into a clickable link pointing at the attacker host: {leaking_links}'
     )
