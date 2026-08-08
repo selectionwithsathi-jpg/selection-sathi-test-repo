@@ -1,6 +1,7 @@
 import os
 import time
 import pytest
+import httpx
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -24,6 +25,28 @@ def base_url():
 @pytest.fixture(scope='session')
 def admin_credentials():
     return {'username': ADMIN_USERNAME, 'password': ADMIN_PASSWORD}
+
+
+@pytest.fixture(scope='session')
+def admin_api_token(base_url, admin_credentials):
+    """Bearer token from the JSON admin-login API, independent of the browser session.
+
+    Used only for out-of-band setup/teardown of disposable test data (e.g. deleting
+    a test exam created during a UI test) so UI tests never leave orphaned records
+    behind on this production site.
+    """
+    try:
+        resp = httpx.post(
+            f'{base_url}/api/auth/admin-login',
+            json={'username': admin_credentials['username'], 'password': admin_credentials['password']},
+            timeout=30.0,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            return None
+        return resp.json().get('access_token')
+    except Exception:
+        return None
 
 
 def _wait_ready(driver, timeout=15):
