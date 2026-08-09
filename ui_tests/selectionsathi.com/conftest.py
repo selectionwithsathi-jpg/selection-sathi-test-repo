@@ -1,6 +1,7 @@
 import os
 import time
 import pytest
+import httpx
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -24,6 +25,28 @@ def base_url():
 @pytest.fixture(scope='session')
 def admin_credentials():
     return {'username': ADMIN_USERNAME, 'password': ADMIN_PASSWORD}
+
+
+@pytest.fixture(scope='session')
+def admin_api_token(base_url, admin_credentials):
+    """Bearer token from the JSON admin-login API, independent of the browser session.
+
+    Used only for out-of-band setup/teardown of disposable test data (e.g. deleting
+    a test exam created during a UI test) so UI tests never leave orphaned records
+    behind on this production site.
+    """
+    try:
+        resp = httpx.post(
+            f'{base_url}/api/auth/admin-login',
+            json={'username': admin_credentials['username'], 'password': admin_credentials['password']},
+            timeout=30.0,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            return None
+        return resp.json().get('access_token')
+    except Exception:
+        return None
 
 
 def _wait_ready(driver, timeout=15):
@@ -84,3 +107,29 @@ def helpers():
         'user_field_selector': USER_FIELD_SELECTOR,
         'submit_selector': SUBMIT_SELECTOR,
     }
+
+
+def pytest_runtest_makereport(item, call):
+    """On any failure, surface current URL + visible buttons/links so a bare
+    AssertionError/Timeout is never the whole story in the TMS logs tab.
+    """
+    if call.when != 'call' or call.excinfo is None:
+        return
+    driver = item.funcargs.get('driver') if hasattr(item, 'funcargs') else None
+    if driver is None:
+        return
+    try:
+        url = driver.current_url
+    except Exception:
+        url = '<driver unavailable - session may be dead>'
+    visible = []
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, 'button, a')[:30]:
+            if el.is_displayed():
+                label = (el.text or el.get_attribute('aria-label') or '').strip()
+                if label:
+                    visible.append(label)
+    except Exception:
+        pass
+    print(f'\n[FAILURE DIAGNOSTICS] test={item.name} url={url}')
+    print(f'[FAILURE DIAGNOSTICS] visible buttons/links: {visible}')
