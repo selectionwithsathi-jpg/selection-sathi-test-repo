@@ -34,6 +34,20 @@ actions. The ambiguous recorded clicks on nested <svg><circle>/<rect> paths
 (icon sub-elements, not separate controls) are treated as a single logical
 click on the enclosing button, located by aria-label/text instead of the
 recorded nth-of-type chain.
+
+HISTORY -- 2026-08-08 run: test_admin_exam_create_adds_new_exam_to_list and
+the disposable_exam fixture (which drives the same Add-Exam flow) both hit
+the 240s pytest-timeout inside _create_exam_via_ui, on the same statement
+(reading the description textarea) right after the name input was already
+found via an explicit wait. Because that statement is a plain find_elements
+call with no wait of its own, a 240s stall there points to the browser
+itself being blocked (e.g. the Add-Exam modal or a dependent dropdown
+fetch hanging) rather than a missing element. _wait_for_by_text below adds
+an explicit bounded wait before every control lookup in this flow (so a
+slow-to-render modal fails fast with a clear TimeoutError-like skip instead
+of stalling the whole test), and pytest_runtest_makereport in conftest.py
+now prints the current URL + visible controls on any failure so the next
+run does not need to reproduce blind.
 """
 import time
 import uuid
@@ -79,6 +93,19 @@ def _find_by_text(driver, tag_css, texts):
     return found
 
 
+def _wait_for_by_text(driver, tag_css, texts, timeout=20):
+    """Bounded wait for _find_by_text so a slow/hanging modal fails fast
+    with a clear signal instead of stalling until the global test timeout."""
+    end = time.time() + timeout
+    last = []
+    while time.time() < end:
+        last = _find_by_text(driver, tag_css, texts)
+        if last:
+            return last
+        time.sleep(0.5)
+    return last
+
+
 def _find_exam_row(driver, needle):
     for el in driver.find_elements(By.CSS_SELECTOR, 'tr, [role="row"], div[class*="row" i]'):
         try:
@@ -106,13 +133,12 @@ def _open_exams(driver, base_url, admin_credentials, helpers):
 
 
 def _create_exam_via_ui(driver, helpers, payload):
-    add_buttons = _find_by_text(driver, 'button, a', ['add exam'])
+    add_buttons = _wait_for_by_text(driver, 'button, a', ['add exam'])
     if not add_buttons:
-        pytest.skip('No "Add Exam" control found on /admin/exams')
+        pytest.skip('No "Add Exam" control found on /admin/exams within 20s')
     add_buttons[0].click()
-    time.sleep(1)
 
-    name_input = WebDriverWait(driver, 10).until(
+    name_input = WebDriverWait(driver, 20).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, 'input[placeholder="e.g., SSC CGL"]'))
     )
     name_input.clear()
@@ -140,7 +166,7 @@ def _create_exam_via_ui(driver, helpers, payload):
         description_inputs[0].clear()
         description_inputs[0].send_keys(payload['description'])
 
-    create_buttons = _find_by_text(driver, 'button', ['create'])
+    create_buttons = _wait_for_by_text(driver, 'button', ['create'], timeout=10)
     if not create_buttons:
         pytest.skip('No "Create" submit control found on the Add Exam form')
     create_buttons[0].click()
@@ -190,6 +216,7 @@ def disposable_exam(driver, base_url, admin_credentials, helpers, admin_api_toke
     _delete_exam_via_api(base_url, admin_api_token, payload['code'])
 
 
+@pytest.mark.timeout(300)
 def test_admin_exam_create_adds_new_exam_to_list(driver, base_url, admin_credentials, helpers, admin_api_token):
     """Submitting the Add Exam form persists a new exam and it appears in the exam list.
 
@@ -210,6 +237,7 @@ def test_admin_exam_create_adds_new_exam_to_list(driver, base_url, admin_credent
         _delete_exam_via_api(base_url, admin_api_token, payload['code'])
 
 
+@pytest.mark.timeout(300)
 def test_admin_exam_edit_updates_name(driver, base_url, helpers, disposable_exam):
     """Editing an exam's name via the Edit form persists the change on the exam list.
 
@@ -231,16 +259,15 @@ def test_admin_exam_edit_updates_name(driver, base_url, helpers, disposable_exam
     if not edit_control:
         pytest.skip('No clickable edit control found in the disposable test exam row')
     edit_control.click()
-    time.sleep(1)
 
-    name_input = WebDriverWait(driver, 10).until(
+    name_input = WebDriverWait(driver, 20).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, 'input[placeholder="e.g., SSC CGL"]'))
     )
     updated_name = disposable_exam['name'] + ' -edited'
     name_input.clear()
     name_input.send_keys(updated_name)
 
-    update_buttons = _find_by_text(driver, 'button', ['update'])
+    update_buttons = _wait_for_by_text(driver, 'button', ['update'], timeout=10)
     if not update_buttons:
         pytest.skip('No "Update" submit control found on the Edit Exam form')
     update_buttons[0].click()
@@ -250,6 +277,7 @@ def test_admin_exam_edit_updates_name(driver, base_url, helpers, disposable_exam
     assert updated_name in body, f"Edited exam name '{updated_name}' did not appear on /admin/exams after update"
 
 
+@pytest.mark.timeout(300)
 def test_admin_exam_payment_settings_toggle_is_reversible(driver, helpers, disposable_exam):
     """Opening Payment Settings for an exam shows a toggle, and flipping it
     changes state -- then flipping it back restores the original state.

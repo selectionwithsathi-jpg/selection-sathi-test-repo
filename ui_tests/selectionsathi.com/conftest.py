@@ -107,3 +107,29 @@ def helpers():
         'user_field_selector': USER_FIELD_SELECTOR,
         'submit_selector': SUBMIT_SELECTOR,
     }
+
+
+def pytest_runtest_makereport(item, call):
+    """On any failure, surface current URL + visible buttons/links so a bare
+    AssertionError/Timeout is never the whole story in the TMS logs tab.
+    """
+    if call.when != 'call' or call.excinfo is None:
+        return
+    driver = item.funcargs.get('driver') if hasattr(item, 'funcargs') else None
+    if driver is None:
+        return
+    try:
+        url = driver.current_url
+    except Exception:
+        url = '<driver unavailable - session may be dead>'
+    visible = []
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, 'button, a')[:30]:
+            if el.is_displayed():
+                label = (el.text or el.get_attribute('aria-label') or '').strip()
+                if label:
+                    visible.append(label)
+    except Exception:
+        pass
+    print(f'\n[FAILURE DIAGNOSTICS] test={item.name} url={url}')
+    print(f'[FAILURE DIAGNOSTICS] visible buttons/links: {visible}')
